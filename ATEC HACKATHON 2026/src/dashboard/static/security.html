@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C.R.A.T.E.R — Security &amp; Intrusion Monitor</title>
+<style>
+  :root{
+    --bg:#070b10; --panel:#0d141b; --line:rgba(255,255,255,.08);
+    --ink:#eaffff; --dim:rgba(234,255,255,.55); --dim2:rgba(234,255,255,.35);
+    --ok:#3ddc97; --bad:#ff5d6c; --warn:#ffcc66; --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;min-height:100vh}
+  header{padding:18px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  header h1{font-size:17px;margin:0;letter-spacing:.03em;font-weight:700}
+  header h1 span{color:var(--dim);font-weight:400;font-size:13px;margin-left:10px}
+  .badge{display:inline-flex;align-items:center;gap:7px;padding:6px 14px;border-radius:999px;font-weight:700;font-size:13px;letter-spacing:.04em}
+  .badge.ok{background:rgba(61,220,151,.12);color:var(--ok);border:1px solid rgba(61,220,151,.35)}
+  .badge.warn{background:rgba(255,93,108,.14);color:var(--bad);border:1px solid rgba(255,93,108,.4);animation:pulse 1.1s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
+  main{padding:20px 24px;display:grid;grid-template-columns:1.1fr .9fr;gap:18px;max-width:1400px;margin:0 auto}
+  @media (max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:18px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin:0 0 14px;display:flex;align-items:center;gap:8px}
+  .card h2::before{content:'';width:3px;height:13px;background:var(--ok);border-radius:2px;display:inline-block}
+  .attacker{border:1px solid rgba(255,93,108,.4);background:rgba(255,93,108,.06);border-radius:12px;padding:16px;margin-bottom:12px}
+  .attacker .addr{font-family:var(--mono);font-size:22px;font-weight:700;color:#ff8a94;word-break:break-all}
+  .attacker .row{display:flex;justify-content:space-between;margin-top:8px;font-size:13px;color:var(--dim)}
+  .attacker .row b{color:var(--ink)}
+  .empty{color:var(--dim2);font-size:13px;padding:30px 10px;text-align:center;border:1px dashed var(--line);border-radius:10px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .stat{background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .stat .n{font-size:22px;font-weight:700;font-family:var(--mono)}
+  .stat .l{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
+  .stat.bad .n{color:var(--bad)} .stat.ok .n{color:var(--ok)} .stat.warn .n{color:var(--warn)}
+  .bars{display:flex;flex-direction:column;gap:9px}
+  .bar-row{display:grid;grid-template-columns:140px 1fr 40px;align-items:center;gap:8px;font-size:12px}
+  .bar-row .track{height:7px;background:rgba(255,255,255,.07);border-radius:4px;overflow:hidden}
+  .bar-row .fill{height:100%;background:var(--ok);border-radius:4px;transition:width .3s}
+  .bar-row .fill.bad{background:var(--bad)}
+  .events{display:flex;flex-direction:column;gap:8px;max-height:420px;overflow-y:auto}
+  .ev{border-left:3px solid var(--line);padding:8px 10px;background:rgba(255,255,255,.02);border-radius:0 8px 8px 0;font-size:12.5px}
+  .ev.fail{border-left-color:var(--bad)} .ev.ok{border-left-color:var(--ok)}
+  .ev .top{display:flex;justify-content:space-between;font-weight:700;letter-spacing:.03em}
+  .ev.fail .top{color:var(--bad)} .ev.ok .top{color:var(--ok)}
+  .ev .detail{color:var(--dim);margin-top:3px;font-family:var(--mono);font-size:11.5px;word-break:break-word}
+  .rl{border:1px solid rgba(61,220,151,.35);background:rgba(61,220,151,.05);border-radius:12px;padding:14px 16px;font-size:13px}
+  .rl .t{font-weight:700;color:var(--ok);letter-spacing:.04em;font-size:12px;margin-bottom:8px}
+  .rl .row{display:flex;justify-content:space-between;margin-top:5px;color:var(--dim)}
+  .rl .row b{color:var(--ink);font-family:var(--mono)}
+  .qtable{margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--dim2)}
+  .layers{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+  .layer{flex:1;min-width:90px;text-align:center;padding:8px 4px;border-radius:8px;border:1px solid var(--line);background:rgba(255,255,255,.02)}
+  .layer .n{font-size:11px;font-weight:700;color:var(--dim)}
+  .layer .v{font-size:16px;font-weight:700;margin-top:3px}
+  .conn{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim2)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dim2)}
+  .dot.live{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+</style>
+</head>
+<body>
+<header>
+  <h1>SECURITY &amp; INTRUSION MONITOR <span>Project C.R.A.T.E.R — Mission Control</span></h1>
+  <div style="display:flex;align-items:center;gap:14px">
+    <div class="conn"><span class="dot" id="liveDot"></span><span id="liveTxt">connecting...</span></div>
+    <div class="badge ok" id="stateBadge">NOMINAL</div>
+  </div>
+</header>
+<main>
+  <div>
+    <div class="card">
+      <h2>Attacker</h2>
+      <div id="attackerBox"><div class="empty">No intrusion detected yet. Run the external attack script to test the link.</div></div>
+    </div>
+    <div class="card">
+      <h2>Link integrity</h2>
+      <div class="grid2">
+        <div class="stat ok"><div class="n" id="stEnc">0</div><div class="l">Encrypted</div></div>
+        <div class="stat ok"><div class="n" id="stOk">0</div><div class="l">Authenticated</div></div>
+        <div class="stat bad"><div class="n" id="stFail">0</div><div class="l">Rejected</div></div>
+        <div class="stat warn"><div class="n" id="stFec">0</div><div class="l">FEC recoveries</div></div>
+      </div>
+      <div class="layers" id="layerBox"></div>
+    </div>
+    <div class="card">
+      <h2>Posture breakdown</h2>
+      <div class="bars" id="postureBars"></div>
+    </div>
+  </div>
+  <div>
+    <div class="card">
+      <h2>Enforcement learning (Q-learning policy)</h2>
+      <div class="rl" id="rlBox">—</div>
+    </div>
+    <div class="card">
+      <h2>Live events <span style="font-weight:400;text-transform:none;letter-spacing:0">(blocked / rejected / recovered)</span></h2>
+      <div class="events" id="eventFeed"><div class="empty">Waiting for telemetry...</div></div>
+    </div>
+  </div>
+</main>
+<script>
+const API = location.origin;
+let lastEnc=0,lastOk=0,lastFail=0;
+let pinned=[], seen=new Set();
+const MAX_PIN=80;
+
+async function poll(){
+  try{
+    const [stats, trace] = await Promise.all([
+      fetch(API+'/api/pipeline_stats').then(r=>r.json()),
+      fetch(API+'/api/trace?limit=400').then(r=>r.json()),
+    ]);
+    document.getElementById('liveDot').classList.add('live');
+    document.getElementById('liveTxt').textContent = 'live';
+    render(stats, trace);
+  }catch(e){
+    document.getElementById('liveDot').classList.remove('live');
+    document.getElementById('liveTxt').textContent = 'disconnected — is run_pipeline.py running?';
+  }
+}
+
+function absorb(rows){
+  for(const r of rows){
+    if(!['auth_failed','blocked','recovered'].includes(r.stage)) continue;
+    const key = r.ts_ms+'|'+r.stage+'|'+r.detail;
+    if(seen.has(key)) continue;
+    seen.add(key); pinned.push(r);
+  }
+  if(pinned.length>MAX_PIN) pinned = pinned.slice(-MAX_PIN);
+}
+
+function render(s, trace){
+  absorb(trace);
+  const intr = s.intrusion || {state:'NOMINAL', blocked:[], counts:{}, policy:null};
+  const ic = intr.counts || {};
+
+  const badge = document.getElementById('stateBadge');
+  badge.textContent = intr.state;
+  badge.className = 'badge ' + (intr.state === 'UNDER ATTACK' ? 'warn' : 'ok');
+
+  document.getElementById('stEnc').textContent = s.packets_encrypted || 0;
+  document.getElementById('stOk').textContent = s.packets_auth_ok || 0;
+  document.getElementById('stFail').textContent = s.packets_auth_failed || 0;
+  document.getElementById('stFec').textContent = s.fec_recoveries || 0;
+
+  document.getElementById('layerBox').innerHTML = [
+    ['L1 ORIGIN', intr.trusted_link || '—'],
+    ['L2 AEAD', (s.packets_auth_failed||0) + ' rejected'],
+    ['L3 CRC8', (ic.off_path||0) + ' off-path'],
+  ].map(([n,v]) => `<div class="layer"><div class="n">${n}</div><div class="v">${v}</div></div>`).join('');
+
+  const blocked = intr.blocked || [];
+  const incident = intr.last_incident;
+  const attEl = document.getElementById('attackerBox');
+  if(blocked.length || incident){
+    const src = blocked.length ? blocked[0].source : incident.source;
+    const layer = incident ? incident.layer : '—';
+    const origin = incident ? incident.origin : 'off-path';
+    const status = blocked.length
+      ? `<span style="color:var(--bad)">BLOCKED</span> — resumes in ${blocked[0].resumes_in_s}s (strike ${blocked[0].strike})`
+      : `<span style="color:var(--ok)">RECOVERED</span> — block expired, source self-healed back in`;
+    attEl.innerHTML = `<div class="attacker">
+      <div class="addr">${src}</div>
+      <div class="row"><span>Origin</span><b>${origin}</b></div>
+      <div class="row"><span>Caught at layer</span><b>${layer}</b></div>
+      <div class="row"><span>Status</span><b>${status}</b></div>
+    </div>`;
+  } else {
+    attEl.innerHTML = '<div class="empty">No intrusion detected yet. Run the external attack script to test the link.</div>';
+  }
+
+  const rows = [
+    ['Blocked sources', blocked.length, false],
+    ['Off-path rejections', ic.off_path||0, false],
+    ['Dropped while blocked', ic.blocked_drops||0, false],
+    ['Incidents', ic.incidents||0, false],
+    ['Auto-recoveries (self-heal)', ic.recoveries||0, false],
+  ];
+  const mx = Math.max(1, ...rows.map(r=>r[1]));
+  document.getElementById('postureBars').innerHTML = rows.map(([n,v])=>
+    `<div class="bar-row"><span>${n}</span><span class="track"><span class="fill${n==='Incidents'&&v>0?' bad':''}" style="width:${(v/mx*100).toFixed(0)}%"></span></span><span style="text-align:right">${v}</span></div>`
+  ).join('');
+
+  const p = intr.policy;
+  document.getElementById('rlBox').innerHTML = p ? `
+    <div class="t">TABULAR Q-LEARNING — BLOCK DURATION POLICY</div>
+    <div class="row"><span>Decisions made</span><b>${p.decisions}</b></div>
+    <div class="row"><span>Rewards settled</span><b>${p.rewards_given}</b></div>
+    <div class="row"><span>Exploration rate (ε)</span><b>${p.epsilon}</b></div>
+    <div class="row"><span>Learned 1st-strike block</span><b>${p.learned_next_block_s}s</b></div>
+    <div class="qtable">action menu: [${p.actions_s.join('s, ')}s] &middot; persists to rl_policy.json across runs</div>
+  ` : '<div class="empty">policy not reporting yet</div>';
+
+  const evRows = pinned.slice(-14).reverse().map(r=>{
+    const isBlock = r.stage==='blocked', isRecover = r.stage==='recovered';
+    const label = isBlock?'BLOCKED':isRecover?'RECOVERED':'REJECTED';
+    return `<div class="ev ${isRecover?'ok':'fail'}"><div class="top"><span>${label}</span><span>${new Date(r.ts_ms).toLocaleTimeString()}</span></div><div class="detail">${r.detail||'—'}</div></div>`;
+  });
+  document.getElementById('eventFeed').innerHTML = evRows.length ? evRows.join('') : '<div class="empty">Waiting for telemetry...</div>';
+}
+
+poll();
+setInterval(poll, 800);
+</script>
+</body>
+</html>

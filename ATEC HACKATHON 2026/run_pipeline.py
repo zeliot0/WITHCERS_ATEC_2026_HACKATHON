@@ -48,6 +48,7 @@ from src.localization import CameraModel, RoverPose, pixel_to_landing_frame, Loc
 from src.perception import generate_world_hazard_field, render_world_view, detect_hazards
 from src import yolo_detector
 from src.security import MissionCrypto, SecurityError, derive_mission_key
+from src.intrusion import IntrusionGuard, LAYER_AEAD, LAYER_CRC
 from src.dashboard import server as dashboard_server
 
 TRACE_PATH = Path(__file__).parent / "trace_log.jsonl"
@@ -124,13 +125,19 @@ class HazardTracker:
         return assigned_ids
 
 
+def _on_guard_event(trace, kind, source, layer, detail):
+    if kind in ("blocked", "recovered"):
+        trace.log(0, kind, f"{source[0]}:{source[1]} via {layer}: {detail}")
+
+
 class ReceiverState:
     """Receiver-side authoritative hazard state: merges FULL/DELTA packets
     and performs FEC reconstruction before handing clean hazard updates to
     the dashboard broadcast queue."""
 
-    def __init__(self, trace: TraceLogger, kind_lookup: dict, crypto: MissionCrypto):
+    def __init__(self, trace: TraceLogger, kind_lookup: dict, crypto: MissionCrypto, guard: IntrusionGuard):
         self.trace = trace
+        self.guard = guard
         self.kind_lookup = kind_lookup  # hazard_id -> "crater"/"rock" (sent out-of-band for this demo)
         self.crypto = crypto
         self.positions: dict[int, dict] = {}
@@ -141,23 +148,30 @@ class ReceiverState:
         self._current_block = 0
         self.fec_recovery_count = 0  # aggregate stat for dashboard
 
-    def handle_packet(self, wire_bytes: bytes):
+    def handle_packet(self, wire_bytes: bytes, src: tuple | None = None):
         # Security layer first: every wire packet is AEAD-encrypted
         # (ChaCha20-Poly1305). A tampered or corrupted ciphertext fails
         # authentication here and is dropped before it ever reaches the
         # telemetry decoder -- a stronger guarantee than CRC8 alone, which
         # only detects accidental bit errors, not deliberate tampering.
+        if src is not None and not self.guard.admit(src):
+            return
         try:
             raw = self.crypto.decrypt(wire_bytes)
         except SecurityError:
-            self.trace.log(0, "auth_failed", "packet rejected -- tampered or corrupted ciphertext")
+            where = "unknown" if src is None else f"{src[0]}:{src[1]}"
+            self.trace.log(0, "auth_failed", f"rejected at {LAYER_AEAD} from {where} -- tampered or corrupted ciphertext")
+            if src is not None:
+                self.guard.record_failure(src, LAYER_AEAD, "ChaCha20-Poly1305 tag mismatch")
             return
         self.trace.log(0, "authenticated", f"{len(wire_bytes)}B AEAD verified")
 
         try:
             msg = T.decode_any(raw)
         except T.TelemetryError:
-            return  # corrupted packet, silently dropped (CRC already caught it)
+            if src is not None:
+                self.guard.record_failure(src, LAYER_CRC, "telemetry CRC8 mismatch after decryption")
+            return
 
         if msg["type"] == "FULL":
             slot = self._next_slot % T.FEC_K
@@ -265,8 +279,13 @@ def main():
     receiver_crypto = MissionCrypto(crypto_key)
 
     emulator = LinkEmulator(LinkConfig(loss_rate=0.15, latency_ms=150, jitter_ms=60, bandwidth_bps=2000))
-    receiver = ReceiverState(trace, kind_lookup, receiver_crypto)
-    emulator.on_receive(receiver.handle_packet)
+    guard = IntrusionGuard(
+        trusted_source=emulator.forward_addr,
+        on_event=lambda kind, source, layer, detail: _on_guard_event(trace, kind, source, layer, detail),
+        policy_path=str(Path(__file__).parent / "rl_policy.json"),
+    )
+    receiver = ReceiverState(trace, kind_lookup, receiver_crypto, guard)
+    emulator.on_receive_src(receiver.handle_packet)
     emulator.start()
 
     dash_thread = threading.Thread(target=run_dashboard, args=(emulator,), daemon=True)
@@ -289,7 +308,6 @@ def main():
     total_bytes_sent = 0
     total_detections = 0
     fec_skipped = 0
-    packets_tampered_injected = 0
     start_time_ms = int(time.time() * 1000)
 
     dashboard_server.update_pipeline_stats({"start_time_ms": start_time_ms})
@@ -311,7 +329,6 @@ def main():
                 total_bytes_sent = 0
                 total_detections = 0
                 fec_skipped = 0
-                packets_tampered_injected = 0
                 receiver.fec_recovery_count = 0
                 start_time_ms = int(time.time() * 1000)
                 ctrl["reset_requested"] = False
@@ -408,26 +425,6 @@ def main():
                     # honestly in total_bytes_sent rather than hidden.
                     wire_pkt = sender_crypto.encrypt(pkt)
 
-                    # Live attack demo, triggered from the Security dashboard:
-                    # flip one ciphertext byte on exactly the next packet sent.
-                    # This never touches the plaintext or the crypto routines
-                    # themselves -- it simulates an attacker/noise corrupting
-                    # the wire bytes in transit, which is exactly the threat
-                    # AEAD authentication exists to catch. The flag is
-                    # one-shot and self-clearing so it fires on one packet only.
-                    # The tampered packet is handed to the receiver directly,
-                    # bypassing the lossy link's random drop -- the point of
-                    # this demo is to prove the crypto layer rejects it, not
-                    # to also re-roll the independent loss simulation, so a
-                    # judge who clicks the button always sees the rejection.
-                    if ctrl.get("tamper_next"):
-                        tampered = bytearray(wire_pkt)
-                        tampered[-1] ^= 0xFF  # corrupt the final byte (inside the auth tag)
-                        ctrl["tamper_next"] = False
-                        packets_tampered_injected += 1
-                        trace.log(hid, "tampered_injected", "demo: ciphertext corrupted before send -- expect auth_failed on receipt")
-                        receiver.handle_packet(bytes(tampered))
-
                     emulator.send(wire_pkt)
                     total_packets_sent += 1
                     total_bytes_sent += len(wire_pkt)
@@ -458,7 +455,7 @@ def main():
                 "packets_encrypted": sender_crypto.encrypt_count,
                 "packets_auth_ok": receiver_crypto.decrypt_ok_count,
                 "packets_auth_failed": receiver_crypto.decrypt_fail_count,
-                "packets_tampered_injected": packets_tampered_injected,
+                "intrusion": guard.snapshot(),
             })
 
             # Compass convention (matches localization.py): heading 0 = +y

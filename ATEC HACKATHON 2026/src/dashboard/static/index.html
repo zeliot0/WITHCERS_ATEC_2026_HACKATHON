@@ -312,12 +312,14 @@
   .cat .bar b { display: block; height: 100%; width: 0; background: var(--accent); box-shadow: 0 0 6px var(--accentGlow); transition: width .5s; }
   .cat .n { text-align: right; font-family: var(--font-mono); color: var(--bright); }
 
-  /* ===== VIEW SWITCHING (mission / orbital / security) ===== */
-  #orbital, #security { display: none; }
+  /* ===== VIEW SWITCHING (mission / orbital / security / intrusion) ===== */
+  #orbital, #security, #intrusion { display: none; }
   #app[data-view="orbital"] #orbital { display: grid; }
   #app[data-view="security"] #security { display: grid; }
+  #app[data-view="intrusion"] #intrusion { display: block; padding: 10px; min-height: 0; height: calc(100vh - 150px); }
   #app[data-view="orbital"] #main,
-  #app[data-view="security"] #main { display: none; }
+  #app[data-view="security"] #main,
+  #app[data-view="intrusion"] #main { display: none; }
 
   /* ===== SECURITY VIEW ===== */
   #security { grid-template-columns: 350px 1fr 350px; grid-template-rows: minmax(0, 1fr) 215px; gap: 10px; min-height: 0; }
@@ -390,6 +392,7 @@
     <div class="vtab active" data-view="mission" onclick="setView('mission')">Mission View</div>
     <div class="vtab" data-view="orbital" onclick="setView('orbital')">Orbital View</div>
     <div class="vtab" data-view="security" onclick="setView('security')">Security View</div>
+    <div class="vtab" data-view="intrusion" onclick="setView('intrusion')">Intrusion Monitor</div>
   </div>
 
   <svg width="0" height="0" style="position:absolute">
@@ -562,10 +565,6 @@
             </div>
             <div class="code-k" style="margin-top:14px">Layer boundary</div>
             <div style="font-family:var(--font-head);font-size:15px;font-weight:700;color:var(--bright);letter-spacing:.5px;line-height:1.3">Wraps OUTSIDE CRC8 + FEC &mdash; parity XOR math stays on plaintext bytes</div>
-            <div class="code-k" style="margin-top:14px">Live proof</div>
-            <div class="hint" style="margin-bottom:8px">Corrupts one ciphertext byte on the next packet and hands it straight to the receiver &mdash; watch it get rejected in Auth Events below, live.</div>
-            <div class="btn-row"><button class="btn danger" id="attackBtn" style="width:100%" onclick="simulateAttack()">&#9888; SIMULATE ATTACK (inject tampered packet)</button></div>
-            <div class="m-row" style="margin-top:8px"><span class="mk">Attacks simulated</span><span class="mv" id="secTampered" style="color:var(--red)">0</span></div>
           </div>
         </div>
         <div id="secPulseWrap" class="panel">
@@ -585,6 +584,10 @@
           <div class="p-body" id="secPosture"></div>
         </div>
       </div>
+    </div>
+
+    <div id="intrusion">
+      <iframe id="intrusionFrame" src="about:blank" title="Intrusion Monitor" style="width:100%;height:100%;border:0;border-radius:12px;background:#070b10"></iframe>
     </div>
 
   <div id="main">
@@ -1609,12 +1612,16 @@ function setView(v){
   currentView = v;
   document.getElementById('app').setAttribute('data-view', v);
   document.querySelectorAll('.vtab').forEach(t => t.classList.toggle('active', t.dataset.view === v));
+  if(v === 'intrusion'){
+    const f = document.getElementById('intrusionFrame');
+    if(f.getAttribute('src') === 'about:blank') f.src = '/security';
+  }
   window.dispatchEvent(new Event('resize'));
 }
 document.addEventListener('keydown', e => {
   if(e.target.tagName === 'INPUT') return;
   if(e.key === 'v'){
-    const order = ['mission', 'orbital', 'security'];
+    const order = ['mission', 'orbital', 'security', 'intrusion'];
     setView(order[(order.indexOf(currentView) + 1) % order.length]);
   }
 });
@@ -1876,11 +1883,45 @@ let secLastEnc = 0, secLastOk = 0, secLastFail = 0;
 // event can easily scroll out of a small /api/trace window before the next
 // poll even sees it -- these are pinned client-side instead, driven directly
 // off the pipeline_stats deltas we already track, so the proof is never lost.
-let secLocalEvents = []; // {label, stage, detail, ts}
-const MAX_SEC_LOCAL_EVENTS = 4;
-function secPushLocalEvent(label, stage, detail){
-  secLocalEvents.unshift({label, stage, detail, ts: Date.now()});
-  if(secLocalEvents.length > MAX_SEC_LOCAL_EVENTS) secLocalEvents.pop();
+let secPinned = [];
+const secSeenKeys = new Set();
+const MAX_SEC_PINNED = 60;
+const SEC_STAGES = ['auth_failed', 'blocked', 'recovered'];
+function secAbsorbTrace(rows){
+  for(const r of rows){
+    if(!SEC_STAGES.includes(r.stage)) continue;
+    const key = r.ts_ms + '|' + r.stage + '|' + r.detail;
+    if(secSeenKeys.has(key)) continue;
+    secSeenKeys.add(key);
+    secPinned.push(r);
+  }
+  if(secPinned.length > MAX_SEC_PINNED) secPinned = secPinned.slice(-MAX_SEC_PINNED);
+}
+function attackerCardHtml(intr){
+  const incident = intr.last_incident;
+  const blocked = intr.blocked || [];
+  if(!incident && !blocked.length) return '';
+  const src = blocked.length ? blocked[0].source : incident.source;
+  const layer = incident ? incident.layer : '-';
+  const origin = incident ? incident.origin : 'off-path';
+  const status = blocked.length
+    ? 'blocked, resumes in ' + blocked[0].resumes_in_s + 's (strike ' + blocked[0].strike + ')'
+    : 'block expired, source readmitted -- self-healed';
+  return `<div style="margin:0 0 12px;padding:10px 12px;border:1px solid rgba(255,93,108,.45);border-radius:10px;background:rgba(255,93,108,.08);font-size:12px;line-height:1.7">
+    <div style="font-weight:700;color:#ff8a94;letter-spacing:.04em">${blocked.length ? 'ATTACKER BLOCKED' : 'LAST ATTACKER'}</div>
+    <div>Source address: <b style="font-family:monospace">${src}</b> (${origin})</div>
+    <div>Caught at layer: <b>${layer}</b></div>
+    <div>Status: ${status}</div>
+  </div>`;
+}
+function policyCardHtml(policy){
+  if(!policy) return '';
+  return `<div style="margin:0 0 12px;padding:10px 12px;border:1px solid rgba(61,220,151,.4);border-radius:10px;background:rgba(61,220,151,.06);font-size:12px;line-height:1.7">
+    <div style="font-weight:700;color:#3ddc97;letter-spacing:.04em">ENFORCEMENT LEARNING (Q-LEARNING)</div>
+    <div>Decisions made: <b>${policy.decisions}</b> &nbsp; Rewards settled: <b>${policy.rewards_given}</b></div>
+    <div>Learned block duration (1st strike): <b>${policy.learned_next_block_s}s</b></div>
+    <div style="color:rgba(234,255,255,.55)">policy adapts block length per source behavior, persists across runs</div>
+  </div>`;
 }
 
 function drawRing(){
@@ -2001,8 +2042,10 @@ secLoop();
 
 let secTrace = [];
 async function secPollTrace(){
-  if(currentView !== 'security') return;
-  try { secTrace = await (await fetch('/api/trace?limit=12')).json(); } catch(e){}
+  try {
+    secTrace = await (await fetch('/api/trace?limit=400')).json();
+    secAbsorbTrace(secTrace);
+  } catch(e){}
 }
 setInterval(secPollTrace, 1200);
 
@@ -2022,24 +2065,19 @@ function secUpdate(){
   viewBadge.className = 'badge ' + (fail > 0 ? 'badge-warn' : 'badge-ok');
   viewBadge.textContent = fail > 0 ? 'TAMPER DETECTED' : 'AEAD ACTIVE';
 
+  const intr = ps.intrusion || {state: 'NOMINAL', blocked: [], counts: {}};
+  const icounts = intr.counts || {};
   const postureBadge = document.getElementById('secPostureBadge');
-  postureBadge.className = 'badge ' + (fail > 0 ? 'badge-warn' : 'badge-ok');
-  postureBadge.textContent = fail > 0 ? 'ANOMALY' : 'NOMINAL';
+  postureBadge.className = 'badge ' + (intr.state === 'UNDER ATTACK' ? 'badge-warn' : 'badge-ok');
+  postureBadge.textContent = intr.state === 'NOMINAL' && fail > 0 ? 'ANOMALY' : intr.state;
 
   // throughput, from the delta since last tick (this function runs every 500ms)
   const dEnc = Math.max(0, enc - secLastEnc), dOk = Math.max(0, ok - secLastOk), dFail = Math.max(0, fail - secLastFail);
   secLastEnc = enc; secLastOk = ok; secLastFail = fail;
   document.getElementById('secPulseRate').textContent = (dOk * 2) + ' pkt/s'; // tick is 500ms -> x2 for per-second
 
-  if(dFail > 0){
-    secPushLocalEvent('REJECTED', 'auth_failed', 'tampered packet failed Poly1305 authentication and was dropped before the decoder');
-  }
-
   secPulseHistory.push({t: Date.now(), ok: dOk, fail: dFail});
   if(secPulseHistory.length > MAX_SEC_PULSE) secPulseHistory.shift();
-
-  const tampered = ps.packets_tampered_injected || 0;
-  document.getElementById('secTampered').textContent = tampered;
 
   // posture breakdown bars, reusing the .cat component from Orbital View
   const rows = [
@@ -2048,60 +2086,35 @@ function secUpdate(){
     ['Rejected', fail],
     ['FEC recoveries', ps.fec_recoveries || 0],
     ['Link survival %', Math.round((linkStats.survival_rate || 0) * 100)],
+    ['Blocked sources', (intr.blocked || []).length],
+    ['Off-path rejections', icounts.off_path || 0],
+    ['Dropped while blocked', icounts.blocked_drops || 0],
+    ['Auto-recoveries', icounts.recoveries || 0],
   ];
   const mx = Math.max(1, ...rows.map(r => r[1]));
-  document.getElementById('secPosture').innerHTML = rows.map(([n, v]) =>
+  document.getElementById('secPosture').innerHTML = attackerCardHtml(intr) + policyCardHtml(intr.policy) + rows.map(([n, v]) =>
     `<div class="cat"><span>${n}</span><span class="bar"><b style="width:${(v/mx*100).toFixed(0)}%;${n==='Rejected'&&v>0?'background:#ff5d6c':''}"></b></span><span class="n">${v}</span></div>`).join('');
 
-  // events — the pinned local attack/rejection events always come first
-  // (guaranteed visible, see secPushLocalEvent above), topped up with
-  // whatever recent security-relevant trace entries still fit.
-  const relevant = secTrace.filter(r => ['authenticated', 'auth_failed', 'tampered_injected', 'transmitted', 'fec_reconstructed'].includes(r.stage));
-  const traceSlots = Math.max(0, 4 - secLocalEvents.length);
-  const traceEvents = relevant.slice(-traceSlots).reverse().map(r => {
-    const isFail = r.stage === 'auth_failed';
-    const isOk = r.stage === 'authenticated';
-    const isAttack = r.stage === 'tampered_injected';
+  const attackerSrc = intr.last_incident ? intr.last_incident.source : null;
+  const evRows = secPinned.slice(-4).reverse().map(r => {
+    const isBlock = r.stage === 'blocked';
+    const isRecover = r.stage === 'recovered';
+    let detail = r.detail || '';
+    if(isBlock && attackerSrc && !detail.includes(attackerSrc)) detail = 'attacker ' + attackerSrc + ' - ' + detail;
     return {
-      label: isFail ? 'REJECTED' : isOk ? 'VERIFIED' : isAttack ? 'ATTACK' : 'hz#' + r.hazard_id,
-      stage: r.stage, detail: r.detail, isFail: isFail || isAttack, isOk,
+      label: isBlock ? 'BLOCKED' : isRecover ? 'RECOVERED' : 'REJECTED',
+      stage: r.stage, detail, isFail: !isRecover, isOk: isRecover,
     };
   });
-  const localAsEv = secLocalEvents.map(e => ({
-    label: e.label, stage: e.stage, detail: e.detail, isFail: e.label !== 'VERIFIED', isOk: false,
-  }));
-  const combined = [...localAsEv, ...traceEvents].slice(0, 4);
+  const fallback = evRows.length ? [] : secTrace.filter(r => r.stage === 'authenticated').slice(-3).reverse().map(r => (
+    { label: 'VERIFIED', stage: r.stage, detail: r.detail, isFail: false, isOk: true }));
+  const combined = [...evRows, ...fallback];
   const evEl = document.getElementById('secEvents');
   evEl.innerHTML = combined.length ? combined.map(r =>
     `<div class="ev ${r.isFail ? 'auth-fail' : r.isOk ? 'auth-ok' : ''}"><span class="d">${r.label}</span><div class="n">${r.stage}</div><div class="s">${r.detail || '—'}</div></div>`
   ).join('') : '<div class="hint">awaiting telemetry data...</div>';
 }
 setInterval(secUpdate, 500);
-
-async function simulateAttack(){
-  const btn = document.getElementById('attackBtn');
-  btn.disabled = true;
-  btn.textContent = '⚠ INJECTING TAMPERED PACKET...';
-  secPushLocalEvent('ATTACK', 'tampered_injected', 'ciphertext byte flipped before send, by request from this dashboard');
-  try {
-    await fetch('/api/pipeline_control', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({tamper_next: true})
-    });
-    setTimeout(() => {
-      btn.textContent = '✓ ATTACK REJECTED — see Auth Events';
-      btn.style.background = 'var(--greenDim)'; btn.style.borderColor = 'var(--green)'; btn.style.color = 'var(--green)';
-      setTimeout(() => {
-        btn.disabled = false;
-        btn.textContent = '⚠ SIMULATE ATTACK (inject tampered packet)';
-        btn.style.background = ''; btn.style.borderColor = ''; btn.style.color = '';
-      }, 2200);
-    }, 700);
-  } catch(e){
-    btn.disabled = false;
-    btn.textContent = '⚠ SIMULATE ATTACK (inject tampered packet)';
-  }
-}
 
 </script>
 </body>

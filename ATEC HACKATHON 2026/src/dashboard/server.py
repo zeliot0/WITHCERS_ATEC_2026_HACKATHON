@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from .local_advisor import get_advice as get_local_advice
+from .local_advisor import get_advice_with_source
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -70,7 +71,6 @@ _pipeline_control = {
     "detector": "depth",
     "detector_active": "depth",
     "fov_360": True,
-    "tamper_next": False,
 }
 
 # ---------------------------------------------------------------------------
@@ -88,7 +88,6 @@ _pipeline_stats = {
     "packets_encrypted": 0,
     "packets_auth_ok": 0,
     "packets_auth_failed": 0,
-    "packets_tampered_injected": 0,
 }
 
 
@@ -239,7 +238,6 @@ class PipelineControlUpdate(BaseModel):
     flare: Optional[bool] = None
     detector: Optional[str] = None
     fov_360: Optional[bool] = None
-    tamper_next: Optional[bool] = None
 
 
 # ---- REST endpoints ----
@@ -279,8 +277,6 @@ async def set_pipeline_control_endpoint(update: PipelineControlUpdate):
         _pipeline_control["detector"] = update.detector
     if update.fov_360 is not None:
         _pipeline_control["fov_360"] = update.fov_360
-    if update.tamper_next is not None:
-        _pipeline_control["tamper_next"] = update.tamper_next
     return {"ok": True, "control": _pipeline_control}
 
 
@@ -322,8 +318,8 @@ async def get_ai_advice():
     combined["unique_hazards"] = _pipeline_stats.get("unique_hazards", 0)
     combined["total_packets_sent"] = _pipeline_stats.get("total_packets_sent", 0)
     combined["flare_active"] = _pipeline_control.get("flare", False)
-    advice = get_local_advice(combined)
-    return {"advice": advice, "source": "local"}
+    advice, source = await asyncio.to_thread(get_advice_with_source, combined)
+    return {"advice": advice, "source": source}
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -331,3 +327,8 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.get("/")
 async def index():
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/security")
+async def security_dashboard():
+    return FileResponse(str(STATIC_DIR / "security.html"))

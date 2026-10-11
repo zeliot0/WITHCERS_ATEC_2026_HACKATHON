@@ -20,6 +20,7 @@ which is the point when a jury is asked to evaluate protocol robustness.
 from __future__ import annotations
 
 import heapq
+import os
 import random
 import socket
 import threading
@@ -111,11 +112,12 @@ class LinkEmulator:
         self._emulator_addr = self._emulator_sock.getsockname()
 
         self._receiver_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._receiver_sock.bind(("127.0.0.1", 0))
+        self._receiver_sock.bind(("127.0.0.1", int(os.environ.get("CRATER_RECEIVER_PORT", "47001"))))
         self._receiver_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
         self._receiver_addr = self._receiver_sock.getsockname()
 
         self._on_receive: Optional[Callable[[bytes], None]] = None
+        self._on_receive_src: Optional[Callable[[bytes, tuple], None]] = None
         self._running = False
         self._threads: list[threading.Thread] = []
 
@@ -152,6 +154,13 @@ class LinkEmulator:
 
     def on_receive(self, callback: Callable[[bytes], None]):
         self._on_receive = callback
+
+    def on_receive_src(self, callback: Callable[[bytes, tuple], None]):
+        self._on_receive_src = callback
+
+    @property
+    def forward_addr(self) -> tuple:
+        return self._emulator_sock.getsockname()
 
     # ---- lifecycle ---------------------------------------------------
     def start(self):
@@ -268,5 +277,7 @@ class LinkEmulator:
                 break
             self.stats.delivered += 1
             self.stats.bytes_delivered += len(data)
-            if self._on_receive is not None:
+            if self._on_receive_src is not None:
+                self._on_receive_src(data, _addr)
+            elif self._on_receive is not None:
                 self._on_receive(data)

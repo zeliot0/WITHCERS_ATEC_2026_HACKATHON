@@ -1,37 +1,9 @@
-"""
-Local Mission Advisor for Project C.R.A.T.E.R -- offline, no network calls.
-
-Why local instead of a cloud LLM API:
-  - Privacy/security: mission telemetry never leaves the rover's own
-    compute. A deep-space or lunar-surface system has no reliable always-on
-    uplink to a cloud API anyway -- the whole premise of this challenge is
-    "no cloud, no GPS, no cellular."
-  - Determinism: a hackathon demo needs an answer every single time, not
-    "the API was rate-limited" or "the key expired" mid-pitch.
-  - No external dependency, no API key to leak, no per-call cost.
-
-What this actually is: a small retrieval-augmented system (RAG), not a
-fine-tuned language model -- that distinction matters and we say so openly
-rather than overclaiming. The "knowledge base" below is a short set of real
-aerospace engineering principles (CCSDS telemetry framing, deep-space FEC
-heritage, DSN link-budget practice, planetary-rover hazard-avoidance
-doctrine, radiation effects on electronics) written in our own words from
-well-known public domain aerospace engineering knowledge -- not copied from
-any proprietary source. A lightweight TF-IDF retriever picks the most
-relevant entry for the current link/pipeline state, and a small rule
-engine turns live telemetry numbers into a concrete, numbers-backed
-assessment. Swap this retriever for a local embedding model and the same
-interface keeps working -- that's the natural "future work" upgrade path.
-"""
-from __future__ import annotations
-
+import json
 import math
+import os
 import re
+import urllib.request
 from collections import Counter
-
-# ---------------------------------------------------------------------------
-# Knowledge base: short, factual aerospace engineering notes.
-# ---------------------------------------------------------------------------
 
 KNOWLEDGE_BASE = [
     {
@@ -132,63 +104,65 @@ KNOWLEDGE_BASE = [
     },
 ]
 
-_STOPWORDS = {"the", "a", "an", "is", "are", "to", "of", "and", "on", "in", "for", "this", "with", "as"}
+_STOPWORDS = frozenset({"the", "a", "an", "is", "are", "to", "of", "and", "on", "in", "for", "this", "with", "as"})
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+QUERIES = {
+    "flare": "radiation solar flare sensor noise bit flip electronics",
+    "severe_no_fec": "link budget degraded severe loss bandwidth",
+    "fec": "fec forward error correction parity recovery reed solomon",
+    "severe": "link budget degraded severe loss bandwidth",
+    "hazard": "hazard avoidance rover safety autonomy",
+    "default": "telemetry packet framing overhead protocol",
+}
 
 
-def _tokenize(text: str) -> list[str]:
-    words = re.findall(r"[a-z0-9]+", text.lower())
-    return [w for w in words if w not in _STOPWORDS]
+def _tokenize(text):
+    return [w for w in _TOKEN_RE.findall(text.lower()) if w not in _STOPWORDS]
 
 
-# TF-IDF index built once at import time over the small fixed KB -- no
-# external ML library needed for a handful of documents.
+_N_DOCS = len(KNOWLEDGE_BASE)
 _DOC_TOKENS = [_tokenize(e["tags"] + " " + e["text"]) for e in KNOWLEDGE_BASE]
-_DOC_FREQ: Counter = Counter()
+_DOC_FREQ = Counter()
 for _toks in _DOC_TOKENS:
     _DOC_FREQ.update(set(_toks))
-_N_DOCS = len(KNOWLEDGE_BASE)
 
 
-def _tfidf_vector(tokens: list[str]) -> Counter:
-    tf = Counter(tokens)
-    vec = Counter()
-    for term, count in tf.items():
-        df = _DOC_FREQ.get(term, 0)
-        idf = math.log((_N_DOCS + 1) / (df + 1)) + 1.0
-        vec[term] = count * idf
-    return vec
+def _tfidf(tokens):
+    return {
+        term: count * (math.log((_N_DOCS + 1) / (_DOC_FREQ.get(term, 0) + 1)) + 1.0)
+        for term, count in Counter(tokens).items()
+    }
 
 
-_DOC_VECTORS = [_tfidf_vector(toks) for toks in _DOC_TOKENS]
+def _norm(vec):
+    return math.sqrt(sum(v * v for v in vec.values()))
 
 
-def _cosine(a: Counter, b: Counter) -> float:
-    common = set(a) & set(b)
-    dot = sum(a[t] * b[t] for t in common)
-    na = math.sqrt(sum(v * v for v in a.values()))
-    nb = math.sqrt(sum(v * v for v in b.values()))
-    if na == 0 or nb == 0:
+_DOC_VECTORS = [_tfidf(t) for t in _DOC_TOKENS]
+_DOC_NORMS = [_norm(v) for v in _DOC_VECTORS]
+
+
+def _cosine(a, na, b, nb):
+    if na == 0.0 or nb == 0.0:
         return 0.0
-    return dot / (na * nb)
+    if len(a) > len(b):
+        a, b = b, a
+    return sum(v * b[t] for t, v in a.items() if t in b) / (na * nb)
 
 
-def retrieve(query: str, top_k: int = 1) -> list[dict]:
-    """Pure-Python TF-IDF retrieval over the local knowledge base."""
-    qvec = _tfidf_vector(_tokenize(query))
-    scored = [(_cosine(qvec, dv), entry) for dv, entry in zip(_DOC_VECTORS, KNOWLEDGE_BASE)]
+def retrieve(query, top_k=1):
+    qvec = _tfidf(_tokenize(query))
+    qnorm = _norm(qvec)
+    scored = [
+        (_cosine(qvec, qnorm, dv, dn), i)
+        for i, (dv, dn) in enumerate(zip(_DOC_VECTORS, _DOC_NORMS))
+    ]
     scored.sort(key=lambda p: p[0], reverse=True)
-    return [entry for score, entry in scored[:top_k] if score > 0]
+    return [KNOWLEDGE_BASE[i] for score, i in scored[:top_k] if score > 0]
 
 
-# ---------------------------------------------------------------------------
-# Rule engine: turns live pipeline/link numbers into a concrete assessment,
-# then grounds it with the most relevant retrieved knowledge-base entry.
-# ---------------------------------------------------------------------------
-
-def get_advice(stats: dict) -> str:
-    """stats: a flat dict of current link + pipeline numbers (see server.py
-    /api/ai_advice for the exact fields). Returns a 2-4 sentence, fully
-    local, deterministic assessment -- no network call, ever."""
+def get_advice(stats):
     loss_rate = float(stats.get("loss_rate", 0.0) or 0.0)
     latency_ms = float(stats.get("latency_ms", 0.0) or 0.0)
     survival_rate = float(stats.get("survival_rate", 1.0) or 1.0)
@@ -198,57 +172,93 @@ def get_advice(stats: dict) -> str:
     total_packets = int(stats.get("total_packets_sent", 0) or 0)
     flare_active = bool(stats.get("flare_active", False))
 
-    # Pick exactly ONE retrieval query from whichever single condition is
-    # most salient right now (priority order below), so the grounding text
-    # actually matches the headline instead of averaging several topics
-    # together into whichever one happens to score highest on raw overlap.
     if flare_active:
-        query = "radiation solar flare sensor noise bit flip electronics"
+        key = "flare"
     elif loss_rate >= 0.3 and not fec_enabled:
-        query = "link budget degraded severe loss bandwidth"
+        key = "severe_no_fec"
     elif fec_recoveries > 0:
-        query = "fec forward error correction parity recovery reed solomon"
+        key = "fec"
     elif loss_rate >= 0.3:
-        query = "link budget degraded severe loss bandwidth"
+        key = "severe"
     elif unique_hazards > 0:
-        query = "hazard avoidance rover safety autonomy"
+        key = "hazard"
     else:
-        query = "telemetry packet framing overhead protocol"
-    hits = retrieve(query, top_k=1)
+        key = "default"
+    hits = retrieve(QUERIES[key])
     grounding = hits[0]["text"] if hits else ""
 
-    # Deterministic status line from the numbers themselves.
+    survival_pct = f"{survival_rate * 100:.0f}"
+    loss_pct = f"{loss_rate * 100:.0f}"
+    fec_clause = f", with {fec_recoveries} packets reconstructed by FEC." if fec_enabled and fec_recoveries else "."
+
     if total_packets == 0:
         headline = "No telemetry observed yet -- mission has not started transmitting."
     elif flare_active:
         headline = (
             f"Solar flare event active: expect elevated sensor noise and bit-level "
-            f"corruption. Current link survival is {survival_rate*100:.0f}%."
+            f"corruption. Current link survival is {survival_pct}%."
         )
     elif loss_rate >= 0.6:
-        headline = (
-            f"Link severely degraded ({loss_rate*100:.0f}% configured loss, "
-            f"{latency_ms:.0f} ms latency). Survival is {survival_rate*100:.0f}%"
-            + (f", with {fec_recoveries} packets reconstructed by FEC." if fec_enabled and fec_recoveries else ".")
-        )
+        headline = f"Link severely degraded ({loss_pct}% configured loss, {latency_ms:.0f} ms latency). Survival is {survival_pct}%" + fec_clause
     elif loss_rate >= 0.3:
         headline = (
-            f"Link degraded ({loss_rate*100:.0f}% loss). Survival holding at "
-            f"{survival_rate*100:.0f}%"
+            f"Link degraded ({loss_pct}% loss). Survival holding at {survival_pct}%"
             + (f" thanks to {fec_recoveries} FEC recoveries." if fec_enabled and fec_recoveries else " -- FEC is currently disabled, so losses are not being recovered.")
         )
     else:
         headline = (
-            f"Link nominal ({loss_rate*100:.0f}% loss, {latency_ms:.0f} ms latency). "
-            f"Survival at {survival_rate*100:.0f}%, {unique_hazards} hazards tracked."
+            f"Link nominal ({loss_pct}% loss, {latency_ms:.0f} ms latency). "
+            f"Survival at {survival_pct}%, {unique_hazards} hazards tracked."
         )
 
-    recommendation = ""
     if not fec_enabled and loss_rate > 0.15:
         recommendation = " Recommendation: re-enable FEC -- at this loss rate it materially improves survival."
     elif flare_active:
         recommendation = " Recommendation: hold position until the flare clears; new detections are less reliable right now."
     elif loss_rate >= 0.6:
         recommendation = " Recommendation: prioritize high-confidence, near-range hazards only until the link recovers."
+    else:
+        recommendation = ""
 
     return f"{headline}{recommendation} ({grounding})"
+
+
+OLLAMA_URL = os.environ.get("CRATER_OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
+OLLAMA_MODEL = os.environ.get("CRATER_OLLAMA_MODEL", "qwen2.5:3b")
+OLLAMA_TIMEOUT_S = float(os.environ.get("CRATER_OLLAMA_TIMEOUT", "4"))
+
+_LLM_SYSTEM_PROMPT = (
+    "You are the mission advisor for a lunar rover telemetry system. "
+    "Reply with 2 to 3 short plain-English sentences. Use only the numbers "
+    "and facts given to you; never invent figures. No markdown, no lists."
+)
+
+
+def _ask_ollama(assessment):
+    prompt = (
+        "Telemetry assessment (its numbers are authoritative, keep them exactly):\n"
+        f"{assessment}\n\n"
+        "Rewrite this as clear advice for the mission operator."
+    )
+    body = json.dumps({
+        "model": OLLAMA_MODEL,
+        "system": _LLM_SYSTEM_PROMPT,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": 0.2, "num_predict": 120},
+    }).encode("utf-8")
+    req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT_S) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return (data.get("response") or "").strip()[:600] or None
+
+
+def get_advice_with_source(stats):
+    rules_text = get_advice(stats)
+    try:
+        llm_text = _ask_ollama(rules_text)
+    except (OSError, ValueError):
+        llm_text = None
+    if llm_text:
+        return llm_text, "llm"
+    return rules_text, "rules"
