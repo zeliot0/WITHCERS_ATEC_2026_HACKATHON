@@ -6,46 +6,50 @@
   <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-blue">
   <img alt="framework" src="https://img.shields.io/badge/backend-FastAPI-009688">
   <img alt="crypto" src="https://img.shields.io/badge/crypto-ChaCha20--Poly1305-critical">
+  <img alt="rl" src="https://img.shields.io/badge/defense-Q--learning-orange">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
 
-**A simulated lunar rover platform combining real-time computer-vision perception, an authenticated encrypted telemetry link over a physically-realistic degraded network, and a self-learning intrusion detection system — built for ATEC'26 at ESPRIT.**
+**A simulated lunar rover platform — built for ATEC'26 at ESPRIT — that doesn't just report a mission, it defends one: real computer-vision perception, authenticated encrypted telemetry over a physically-realistic degraded link, and a self-learning intrusion response system, all wired together end-to-end.**
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [System Architecture](#system-architecture)
-3. [Core Components](#core-components)
-4. [Security Design](#security-design)
-5. [Intrusion Detection & Reinforcement Learning](#intrusion-detection--reinforcement-learning)
-6. [AI Mission Advisor](#ai-mission-advisor)
-7. [Dashboard](#dashboard)
-8. [Tech Stack](#tech-stack)
-9. [Project Structure](#project-structure)
-10. [Getting Started](#getting-started)
-11. [Testing the Attack & Defense System](#testing-the-attack--defense-system)
-12. [Running the Test Suite](#running-the-test-suite)
-13. [Known Limitations](#known-limitations)
-14. [Author](#author)
+1. [The Mission Problem](#1-the-mission-problem)
+2. [Architecture at a Glance](#2-architecture-at-a-glance)
+3. [Problem → Cause → Solution, Subsystem by Subsystem](#3-problem--cause--solution-subsystem-by-subsystem)
+   - [3.1 Perceiving hazards](#31-perceiving-hazards)
+   - [3.2 Knowing where a hazard actually is](#32-knowing-where-a-hazard-actually-is)
+   - [3.3 Getting data home over a hostile, degraded link](#33-getting-data-home-over-a-hostile-degraded-link)
+   - [3.4 Trusting what arrives](#34-trusting-what-arrives)
+   - [3.5 Responding to an attacker, not just detecting one](#35-responding-to-an-attacker-not-just-detecting-one)
+   - [3.6 Giving the operator a second opinion](#36-giving-the-operator-a-second-opinion)
+   - [3.7 Seeing all of this, live](#37-seeing-all-of-this-live)
+4. [Tech Stack](#4-tech-stack)
+5. [Project Structure](#5-project-structure)
+6. [Getting Started](#6-getting-started)
+7. [Testing the Attack & Defense System](#7-testing-the-attack--defense-system)
+8. [Running the Test Suite](#8-running-the-test-suite)
+9. [Known Limitations & Honest Trade-offs](#9-known-limitations--honest-trade-offs)
+10. [Author](#10-author)
 
 ---
 
-## Overview
+## 1. The Mission Problem
 
-A rover operating in a permanently shadowed lunar crater must detect hazards visually, report their position precisely, and do so over a radio link that is simultaneously **unreliable** (bursty packet loss, bandwidth-starved, high latency) and **hostile** (open to tampering and impersonation). C.R.A.T.E.R implements every layer of that problem end-to-end — no component is mocked:
+A rover working inside a **permanently shadowed lunar crater** — the kind of site worth exploring precisely because it may hold water ice — has to operate somewhere that makes everything harder at once:
 
-- Real computer-vision detection pipeline (YOLOv8)
-- Real coordinate geometry with distance-aware uncertainty
-- Real authenticated encryption (ChaCha20-Poly1305)
-- A genuinely simulated network (real UDP sockets, Gilbert-Elliott burst loss, token-bucket bandwidth limiting)
-- A reinforcement-learning-driven intrusion response system that improves its own defense policy over time
-- A live operations dashboard with an AI advisor grounded in local inference
+- **No direct line of sight** to Earth for long stretches → relayed, high-latency, bandwidth-starved communication
+- **Radio shadowing and occlusion** from crater walls → packet loss that comes in *bursts*, not a steady trickle
+- **An open RF link** → anyone who can transmit on the right frequency can inject traffic, whether by accident (interference) or on purpose (spoofing, jamming, replay)
+- **No real-time human operator** watching every packet → the system has to decide for itself, in seconds, whether to trust what just arrived and what to do about it if it shouldn't
+
+C.R.A.T.E.R is a from-scratch simulation of that entire stack: a rover perceives hazards, reports them home over a link that behaves like the real thing (not a mocked one), and defends that link against an active attacker — automatically, and adaptively.
 
 ---
 
-## System Architecture
+## 2. Architecture at a Glance
 
 ```
  World Generation → Perception (YOLOv8) → Localization → Telemetry Encoding (FEC/CRC8)
@@ -81,100 +85,124 @@ A rover operating in a permanently shadowed lunar crater must detect hazards vis
 
 ---
 
-## Core Components
+## 3. Problem → Cause → Solution, Subsystem by Subsystem
 
-### Perception
-Renders a fixed, seeded hazard field and runs **YOLOv8** object detection on the synthetic camera frame to identify rocks and craters.
+### 3.1 Perceiving hazards
 
-| File | Responsibility |
-|---|---|
-| `src/perception.py` | World/hazard rendering |
-| `src/yolo_detector.py` | YOLOv8 inference |
+**Problem.** The rover needs to know a rock or crater is in its path before it drives into it.
 
-### Localization
-Converts 2D pixel detections into real-world (x, y) coordinates using a pinhole camera model and the rover's live pose. Models **distance-proportional uncertainty growth**, matching real stereo-vision error characteristics.
+**Cause.** Raw camera frames are just pixels — there's no hazard information until something interprets them, and that interpretation has to happen fast enough to matter for navigation.
 
-| File | Responsibility |
-|---|---|
-| `src/localization.py` | Pixel → world-frame transform, uncertainty modeling |
-
-### Telemetry Encoding
-| File | Responsibility |
-|---|---|
-| `src/telemetry.py` | DELTA/FULL packet encoding, XOR Forward Error Correction (1 recoverable loss per 4-packet block), CRC8 integrity check |
+**Solution.** `src/perception.py` renders a camera view of a fixed, seeded hazard field, and `src/yolo_detector.py` runs **YOLOv8**, a convolutional neural network object detector, on every frame to identify rocks and craters in real time.
 
 ---
 
-## Security Design
+### 3.2 Knowing where a hazard actually is
 
-| Property | Implementation |
-|---|---|
-| **Confidentiality + Authenticity** | ChaCha20-Poly1305 (AEAD) |
-| **Key Derivation** | HKDF-SHA256 |
-| **Packet Format** | `[12-byte nonce] [ciphertext] [16-byte Poly1305 tag]` |
-| **Source** | `src/security.py` |
+**Problem.** A detection in a 2D image isn't useful on its own — mission control needs a real-world (x, y) position, and it needs to know *how much to trust it*.
 
-AEAD gives a single verification step that proves **both** that the data is unreadable without the key **and** that it was produced by the key-holder and not altered in transit. This is what makes tampering and impersonation collapse into the same detectable failure mode — forging either requires the secret mission key, which no attacker possesses.
+**Cause.** Converting pixels to world coordinates requires the camera's geometry and the rover's current pose, and the further away something is, the less precisely a camera can localize it — error doesn't stay constant with distance, it grows.
+
+**Solution.** `src/localization.py` applies a **pinhole camera model** to transform pixel detections into the landing-site reference frame, and explicitly models **uncertainty that grows with distance**, so a far-off detection is reported with a wider error margin instead of false precision.
 
 ---
 
-## Intrusion Detection & Reinforcement Learning
+### 3.3 Getting data home over a hostile, degraded link
 
-`src/intrusion.py` implements a **3-layer verification pipeline** on every received packet:
+**Problem.** The link between rover and mission control isn't clean. Packets get lost, often in bursts rather than evenly; bandwidth is severely capped; and naively retransmitting everything would blow through that budget.
+
+**Cause.** A permanently shadowed crater means intermittent line-of-sight and radio shadowing — this isn't a corner case, it's the normal operating condition. Most demo systems fake this with a simple "drop X% of messages" list, which doesn't produce the bursty, timing-sensitive behavior a real link has.
+
+**Solution.**
+- `src/link_sim.py` runs **real UDP sockets** across three roles (sender → emulator → receiver) — an actual network path, not a Python list standing in for one.
+- Loss is modeled with a **Gilbert-Elliott burst-loss model**: a 2-state Markov chain (GOOD/BAD) tuned so the long-run average loss rate matches a configurable target, but losses cluster into realistic bursts.
+- A **token-bucket bandwidth cap** drops packets that exceed the current budget, mirroring a saturated downlink with no infinite buffer.
+- `src/telemetry.py` adds **XOR Forward Error Correction**: every block of 4 packets carries parity, so 1 lost packet per block is reconstructed without asking for a retransmit — critical when round-trip latency alone can be hundreds of milliseconds.
+- A lightweight **CRC8** catches corruption in payloads that otherwise decoded fine.
+
+---
+
+### 3.4 Trusting what arrives
+
+**Problem.** Even if a packet arrives intact, how does the receiver know it actually came from the rover — and wasn't quietly modified in transit by someone else on the link?
+
+**Cause.** An open radio link has no inherent sender verification. Anyone transmitting on the right frequency can inject a packet that *looks* like valid telemetry, or intercept and alter a real one — without encryption-with-authentication, the receiver has no way to tell.
+
+**Solution.** `src/security.py` encrypts every packet with **ChaCha20-Poly1305**, an AEAD (Authenticated Encryption with Associated Data) cipher:
+- **ChaCha20** encrypts the payload (confidentiality)
+- **Poly1305** produces a 16-byte tag that proves the ciphertext came from whoever holds the secret key and wasn't altered (authenticity) — `[12-byte nonce][ciphertext][16-byte tag]`
+- The key itself comes from **HKDF-SHA256**, deriving a proper 256-bit key from a mission passphrase
+
+The key insight: one AEAD check gives you both guarantees at once. That's what makes **tampering and impersonation collapse into the same failure mode** — forging either requires the secret key, which no attacker has, so both are caught at the same point in the pipeline with the same mechanism.
+
+---
+
+### 3.5 Responding to an attacker, not just detecting one
+
+**Problem.** Detecting a bad packet is only half the job. If the system just silently drops forged packets forever, an attacker can keep hammering the link indefinitely at no cost to themselves, wasting bandwidth and CPU on every single attempt. The system needs to actively respond — and a fixed, hardcoded response (e.g. "always block for exactly 8 seconds") is either too short to matter against a persistent attacker or too long and wastes availability against a one-off glitch.
+
+**Cause.** The "right" block duration depends on the attacker's actual behavior, which isn't known in advance and can change. A static rule can't adapt to that; it can only guess.
+
+**Solution.** `src/intrusion.py` implements two layers of defense:
+
+**Detection — `IntrusionGuard`, a 3-layer pipeline on every incoming packet:**
 
 | Layer | Checks | Nature |
 |---|---|---|
-| **L1 — Origin** | Source address matches the expected sender | Heuristic, first-pass filter |
-| **L2 — AEAD** | Decryption succeeds, Poly1305 tag verifies | **Cryptographic — the real security gate** |
-| **L3 — CRC8** | Payload integrity after decryption | Data-quality check |
+| L1 — Origin | Source address matches the expected sender | Heuristic, cheap first filter |
+| L2 — AEAD | Decryption + Poly1305 tag verification | **Cryptographic — the real security gate** |
+| L3 — CRC8 | Payload integrity after decryption | Data-quality check |
 
-**Response logic:**
-- A sliding 10-second window tracks rejected packets per source
-- 3 rejections from an off-path source within that window → **the source is blocked**
-- Strikes persist across recoveries, escalating future response severity
-- When a block timer expires, the source is **automatically readmitted** — fully self-healing, no operator action required
+Three rejected packets from an off-path source within a 10-second window triggers a block. Strikes persist across recoveries, escalating future severity. When a block expires, the source is **automatically readmitted** — fully self-healing, no operator action required.
 
-**What makes the response adaptive — `RLBlockPolicy`, a tabular Q-learning agent:**
+**Response — `RLBlockPolicy`, a tabular Q-learning agent that decides block duration:**
 
-| RL Element | Definition |
+| Element | Definition |
 |---|---|
-| **State** | Strike count for the offending source (clipped to 1–4+) |
-| **Action space** | Block duration ∈ `{8s, 16s, 32s, 60s}` |
-| **Reward** | `-1` if the attacker re-offends within a 6s grace window after release (block too short); up to `+1` if the source stays clear (block effective), with a slight efficiency bonus for shorter-but-sufficient durations |
-| **Update rule** | `Q[s,a] ← Q[s,a] + α(reward + γ·max(Q[s′]) − Q[s,a])` |
-| **Exploration** | ε-greedy — favors exploration early, shifts toward the best-known action as evidence accumulates |
-| **Persistence** | Q-table serialized to `rl_policy.json`, surviving process restarts |
+| State | Strike count for the offending source (1–4+) |
+| Action space | Block duration ∈ `{8s, 16s, 32s, 60s}` |
+| Reward | `-1` if the attacker re-offends within a 6s grace window after release (block was too short); up to `+1` if they stay away (block worked), with a bonus for using the shortest sufficient duration |
+| Update rule | `Q[s,a] ← Q[s,a] + α(reward + γ·max(Q[s′]) − Q[s,a])` |
+| Exploration | ε-greedy — random early on, shifting to the best-known action as evidence accumulates |
+| Persistence | Q-table saved to `rl_policy.json`, surviving restarts |
 
-This replaces a fixed exponential-backoff rule with a policy that **learns the effective block duration for the observed attacker behavior**, rather than guessing a hardcoded constant.
-
----
-
-## AI Mission Advisor
-
-`src/dashboard/local_advisor.py` implements a lightweight, fully local Retrieval-Augmented Generation pipeline:
-
-1. **Retrieval** — TF-IDF vectorization + cosine similarity over a curated 7-entry mission knowledge base
-2. **Generation** — optional local inference via **Ollama** (`qwen2.5:3b`), grounded in the retrieved context and live pipeline telemetry
-3. **Fallback** — a deterministic rule engine activates instantly if the LLM is unreachable or exceeds a 4-second timeout, so the dashboard never stalls
-
-No cloud dependency, no external API key, fully operable offline — appropriate for a mission-control context.
+Instead of guessing a constant, the policy **learns the effective block duration for the attacker it's actually seeing**, and keeps that knowledge across runs.
 
 ---
 
-## Dashboard
+### 3.6 Giving the operator a second opinion
 
-FastAPI + WebSocket backend, vanilla JS/Canvas frontend (`src/dashboard/`), organized into four live views:
+**Problem.** Raw telemetry numbers (loss rate, latency, hazard counts) are hard to interpret quickly under pressure, and a mission context means there may be **no internet connection** to call out to for help.
+
+**Cause.** A cloud-hosted AI advisor is a single point of failure the moment connectivity drops — exactly when an operator might need guidance most.
+
+**Solution.** `src/dashboard/local_advisor.py` runs a fully local RAG pipeline:
+1. **TF-IDF + cosine similarity** retrieves the most relevant entry from a curated mission knowledge base
+2. An optional **local LLM** (`qwen2.5:3b` via **Ollama**, on the operator's own GPU) turns that context + live stats into natural-language advice
+3. A **deterministic rule engine** takes over instantly if the LLM is unreachable or exceeds a 4-second timeout — the dashboard never stalls waiting on inference
+
+No cloud dependency, no API key, fully operable offline.
+
+---
+
+### 3.7 Seeing all of this, live
+
+**Problem.** None of the above matters to a human operator if it's buried in logs.
+
+**Cause.** Mission-critical state (link health, security posture, who's attacking and from where) needs to be legible at a glance, in real time, without requiring the operator to parse JSON.
+
+**Solution.** `src/dashboard/` — a FastAPI + WebSocket backend with a vanilla JS/Canvas frontend, four live views:
 
 | View | Purpose |
 |---|---|
-| **Mission View** | Camera feed, rover telemetry, hazard tracking |
-| **Orbital View** | Global map, link statistics, AI advisor |
-| **Security View** | Encryption/authentication posture, event history |
-| **Intrusion Monitor** | Attacker source address, detection layer, block status, live Q-learning policy metrics |
+| Mission View | Camera feed, rover telemetry, hazard tracking |
+| Orbital View | Global map, link statistics, AI advisor |
+| Security View | Encryption/authentication posture, event history |
+| Intrusion Monitor | Attacker source address, detection layer, block status, live Q-learning policy metrics |
 
 ---
 
-## Tech Stack
+## 4. Tech Stack
 
 | Layer | Technology |
 |---|---|
@@ -190,7 +218,7 @@ FastAPI + WebSocket backend, vanilla JS/Canvas frontend (`src/dashboard/`), orga
 
 ---
 
-## Project Structure
+## 5. Project Structure
 
 ```
 ATEC HACKATHON 2026/
@@ -200,7 +228,7 @@ ATEC HACKATHON 2026/
 ├── src/
 │   ├── perception.py              Hazard field rendering
 │   ├── yolo_detector.py           YOLOv8 inference
-│   ├── localization.py            Pixel → world transform
+│   ├── localization.py            Pixel → world transform, uncertainty modeling
 │   ├── telemetry.py               Packet encoding, FEC, CRC8
 │   ├── security.py                ChaCha20-Poly1305, HKDF
 │   ├── link_sim.py                UDP link emulator
@@ -218,32 +246,32 @@ ATEC HACKATHON 2026/
 
 ---
 
-## Getting Started
+## 6. Getting Started
 
-### 1. Install dependencies
+### 6.1 Install dependencies
 ```bash
 cd "ATEC HACKATHON 2026"
 pip install -r requirements.txt
 ```
 
-### 2. (Optional) Enable the local LLM advisor
+### 6.2 (Optional) Enable the local LLM advisor
 ```bash
 # Install Ollama from https://ollama.com
 ollama pull qwen2.5:3b
 ```
 If unavailable, the advisor transparently falls back to its rule engine — no setup required for core functionality.
 
-### 3. Launch the mission pipeline
+### 6.3 Launch the mission pipeline
 ```bash
 python run_pipeline.py
 ```
 
-### 4. Open Mission Control
+### 6.4 Open Mission Control
 Navigate to **http://127.0.0.1:8000**.
 
 ---
 
-## Testing the Attack & Defense System
+## 7. Testing the Attack & Defense System
 
 In a separate terminal, from the same project directory:
 
@@ -255,11 +283,11 @@ python tools/attack_demo.py --mode bitflip --count 5
 python tools/attack_demo.py --mode forge --count 5
 ```
 
-Switch to the **Intrusion Monitor** tab to observe, live: the attacker's source address, the detection layer that caught it, the active block countdown, and the Q-learning policy's decision/reward counters updating in real time.
+Switch to the **Intrusion Monitor** tab to watch, live: the attacker's source address, the layer that caught it, the active block countdown, and the Q-learning policy's decision/reward counters updating.
 
 ---
 
-## Running the Test Suite
+## 8. Running the Test Suite
 
 ```bash
 pytest tests/
@@ -267,15 +295,18 @@ pytest tests/
 
 ---
 
-## Known Limitations
+## 9. Known Limitations & Honest Trade-offs
 
-- **No replay protection** — a previously valid, unmodified packet resent later would still pass AEAD verification; a sequence-number or timestamp check would be required to close this
-- **L1 origin filtering is a heuristic**, not a cryptographic guarantee — the enforceable security boundary is entirely at L2-AEAD
-- **The Q-learning policy benefits from extended interaction** — a short demo session demonstrates the learning mechanism correctly rather than a fully converged policy
-- The demonstration mission key is derived from a fixed passphrase; a production deployment would use provisioned, periodically rotated keys
+Being upfront about what's *not* solved is part of the engineering, not an afterthought:
+
+- **No replay protection.** A captured, unmodified, validly-encrypted packet resent later would still pass AEAD verification — AEAD proves authenticity and integrity, not freshness. Closing this requires a sequence number or timestamp check, which isn't implemented.
+- **L1 origin filtering is a heuristic, not a cryptographic guarantee.** The enforceable security boundary is entirely at L2-AEAD; L1 is a cheap early filter that could, in principle, be spoofed.
+- **The Q-learning policy improves with more interaction.** In a short demo session it demonstrates the learning mechanism correctly — state/action/reward loop, persistence across restarts — rather than arriving at a fully converged, optimal policy.
+- **The demo mission key is derived from a fixed passphrase** for reproducibility. A production deployment would provision and periodically rotate real key material through a pre-launch ground exchange, not hardcode it.
+- **Six pre-existing test failures** in `tests/` (a `telemetry.py` signature mismatch and one localization uncertainty test) predate this security/RL work and were not introduced by it, but remain unresolved.
 
 ---
 
-## Author
+## 10. Author
 
 Built solo for **ATEC'26 — ESPRIT** by **Salim**.
